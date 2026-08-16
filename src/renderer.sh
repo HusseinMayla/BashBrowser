@@ -28,19 +28,25 @@ render_page() {
                 ;;
 
             input)
+                local field_label="${id:-$content}"
                 local value="$extra"
 
-                printf '[%s]\n\n' "$value"
+                if [[ -n "$field_label" ]]; then
+                    printf '\033[36m[Input: %s]\033[0m %s\n\n' "$field_label" "[ ${value} ]"
+                else
+                    printf '\033[36m[Input]\033[0m [ %s ]\n\n' "$value"
+                fi
                 ;;
 
             button)
-                printf '[ %s ]\n\n' "$content"
+                local btn_label="${content:-$id}"
+                printf '\033[32m[Button]\033[0m [ %s ]\n\n' "$btn_label"
                 ;;
 
             link)
                 link_number=$((link_number + 1))
 
-                printf '[%d] %s\n' "$link_number" "$content"
+                printf '\033[34m[%d]\033[0m %s\n' "$link_number" "$content"
                 ;;
 
         esac

@@ -18,34 +18,32 @@ extract_links() {
         grep -oiP 'href="\K[^"]+'
 }
 
-# charcter treasnlator, new line = space
-
-normalize_html() {
-    local html="$1"
-
-    printf '%s' "$html" |
-        tr '\n' ' '
-}
-
 trim_text() {
     local text="$1"
 
+    # Remove inner HTML tags (e.g. <b>...</b> or <span>...</span>)
+    text=$(printf '%s\n' "$text" | sed -E 's/<[^>]+>//g')
+
+    # Trim leading and trailing whitespace
     text="${text#"${text%%[![:space:]]*}"}"
     text="${text%"${text##*[![:space:]]}"}"
 
     printf '%s\n' "$text"
 }
 
-#make every line a token
+# character translator, remove scripts/styles and make every tag a token
 
 tokenize_html() {
     local html="$1"
-    local normalized
 
-    normalized=$(normalize_html "$html")
+    # 1. Strip script and style blocks
+    local clean_html
+    clean_html=$(printf '%s\n' "$html" | perl -0777 -pe 's/<script\b[^>]*>.*?<\/script>//gis; s/<style\b[^>]*>.*?<\/style>//gis')
 
-    printf '%s\n' "$normalized" |
-        sed 's/></>\n</g'
+    # 2. Convert newlines to spaces, then insert newlines between HTML tags
+    printf '%s' "$clean_html" |
+        tr '\n\r\t' ' ' |
+        sed -E 's/>[[:space:]]*</>\n</g'
 }
 
 # get value attrivutes 
@@ -82,10 +80,10 @@ parse_page() {
     local text
     local level
 
-    local label_regex='^<label[^>]*for="([^"]*)"[^>]*>(.*)</label>$'
+    local label_regex='^<label([^>]*)>(.*)</label>$'
     local input_regex='^<input([^>]*)/?>$'
     local button_regex='^<button([^>]*)>(.*)</button>$'
-    local heading_regex='^<h([1-3])[^>]*>(.*)</h[1-3]>$'
+    local heading_regex='^<h([1-6])[^>]*>(.*)</h[1-6]>$'
     local paragraph_regex='^<p[^>]*>(.*)</p>$'
     local link_regex='^<a([^>]*)>(.*)</a>$'
     local br_regex='^<br[[:space:]]*/?>$'
@@ -97,21 +95,23 @@ parse_page() {
             text="${BASH_REMATCH[2]}"
             text=$(trim_text "$text")
 
-            printf 'heading\tlevel=%s\ttext=%s\n' "$level" "$text"
+            [[ -n "$text" ]] && printf 'heading\tlevel=%s\ttext=%s\n' "$level" "$text"
 
         elif [[ "$token" =~ $paragraph_regex ]]; then
             text="${BASH_REMATCH[1]}"
             text=$(trim_text "$text")
 
-            printf 'text\ttext=%s\n' "$text"
+            [[ -n "$text" ]] && printf 'text\ttext=%s\n' "$text"
 
         elif [[ "$token" =~ $link_regex ]]; then
-            local href="${BASH_REMATCH[1]}"
+            local attributes="${BASH_REMATCH[1]}"
             text="${BASH_REMATCH[2]}"
             text=$(trim_text "$text")
 
-            printf 'link\thref=%s\ttext=%s\n' "$href" "$text"
+            local href
+            href=$(get_attribute "$attributes" "href")
 
+            [[ -n "$text" || -n "$href" ]] && printf 'link\thref=%s\ttext=%s\n' "$href" "${text:-$href}"
 
         elif [[ "$token" =~ $button_regex ]]; then
             local attributes="${BASH_REMATCH[1]}"
@@ -127,7 +127,7 @@ parse_page() {
             printf 'button\tid=%s\ttype=%s\ttext=%s\n' \
                 "$button_id" \
                 "$button_type" \
-                "$text"
+                "${text:-Submit}"
 
         elif [[ "$token" =~ $input_regex ]]; then
             local attributes="${BASH_REMATCH[1]}"
@@ -136,25 +136,34 @@ parse_page() {
             local input_name
             local input_type
             local input_value
+            local input_placeholder
 
             input_id=$(get_attribute "$attributes" "id")
             input_name=$(get_attribute "$attributes" "name")
             input_type=$(get_attribute "$attributes" "type")
             input_value=$(get_attribute "$attributes" "value")
+            input_placeholder=$(get_attribute "$attributes" "placeholder")
 
-            printf 'input\tid=%s\tname=%s\ttype=%s\tvalue=%s\n' \
-                "$input_id" \
-                "$input_name" \
-                "$input_type" \
-                "$input_value"
-
+            # Skip hidden CSRF/anti-forgery tokens so they don't clutter the UI
+            if [[ "$input_type" != "hidden" ]]; then
+                # If value is empty, use placeholder as initial prompt text
+                local display_value="${input_value:-$input_placeholder}"
+                printf 'input\tid=%s\tname=%s\ttype=%s\tvalue=%s\n' \
+                    "$input_id" \
+                    "$input_name" \
+                    "${input_type:-text}" \
+                    "$display_value"
+            fi
 
         elif [[ "$token" =~ $label_regex ]]; then
-            local label_for="${BASH_REMATCH[1]}"
+            local attributes="${BASH_REMATCH[1]}"
             text="${BASH_REMATCH[2]}"
             text=$(trim_text "$text")
 
-            printf 'label\tfor=%s\ttext=%s\n' "$label_for" "$text"
+            local label_for
+            label_for=$(get_attribute "$attributes" "for")
+
+            [[ -n "$text" ]] && printf 'label\tfor=%s\ttext=%s\n' "$label_for" "$text"
 
         elif [[ "$token" =~ $br_regex ]]; then
             printf 'br\n'

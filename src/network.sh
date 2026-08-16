@@ -27,10 +27,15 @@ fetch_page() {
         return 1
     fi
 
+COOKIE_JAR="/tmp/bashbrowser_cookies.txt"
 
-# get the http code 
-
+# get the http code with safety timeouts, user-agent, and cookie persistence
     if ! status=$(curl -LsS \
+        --connect-timeout 10 \
+        --max-time 20 \
+        --cookie "$COOKIE_JAR" \
+        --cookie-jar "$COOKIE_JAR" \
+        -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BashBrowser/1.0" \
         -o /tmp/bashbrowser_page \
         -w "%{http_code}" \
         "$url"); then
