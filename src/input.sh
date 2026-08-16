@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Input Parser: Interprets CLI commands and routes actions
+
 read_browser_input() {
     local user_input
 
@@ -38,18 +40,43 @@ read_browser_input() {
         action="click"
         argument="${BASH_REMATCH[1]}"
 
+    # Bookmark commands
+    elif [[ "$user_input" == "bm add" || "$user_input" == "bookmark add" ]]; then
+        action="bookmark_add"
+
+    elif [[ "$user_input" =~ ^(bm|bookmark)[[:space:]]+del[[:space:]]+([0-9]+)$ ]]; then
+        action="bookmark_del"
+        argument="${BASH_REMATCH[2]}"
+
+    elif [[ "$user_input" =~ ^(bm|bookmark)[[:space:]]+([0-9]+)$ ]]; then
+        action="bookmark_open"
+        argument="${BASH_REMATCH[2]}"
+
+    elif [[ "$user_input" == "bm" || "$user_input" == "bookmarks" || "$user_input" == "bm list" || "$user_input" == "bookmarks list" ]]; then
+        action="bookmark_list"
+
+    # History commands
+    elif [[ "$user_input" =~ ^(h|history)[[:space:]]+([0-9]+)$ ]]; then
+        action="history_jump"
+        argument="${BASH_REMATCH[2]}"
+
+    elif [[ "$user_input" == "history" || "$user_input" == "h" ]]; then
+        action="history"
+
+    # Form fill & submit
     elif [[ "$user_input" =~ ^fill[[:space:]]+([^[:space:]]+)[[:space:]]+(.+)$ ]]; then
         action="fill"
         argument="${BASH_REMATCH[1]}|${BASH_REMATCH[2]}"
 
-    elif [[ "$user_input" =~ ^press[[:space:]]+(.+)$ ]]; then
+    elif [[ "$user_input" =~ ^press[[:space:]]*(.*)$ ]]; then
         action="press"
         argument="${BASH_REMATCH[1]}"
 
+    # Navigation & control
     elif [[ "$user_input" == "reload" || "$user_input" == "r" || "$user_input" == "refresh" ]]; then
         action="reload"
 
-    elif [[ "$user_input" == "help" || "$user_input" == "h" || "$user_input" == "?" ]]; then
+    elif [[ "$user_input" == "help" || "$user_input" == "?" ]]; then
         action="help"
 
     elif [[ "$user_input" == "back" || "$user_input" == "b" ]]; then

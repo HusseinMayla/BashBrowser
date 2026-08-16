@@ -2,11 +2,15 @@
 
 # Source all components
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export BASE_DIR
+
 source "$BASE_DIR/src/network.sh"
+source "$BASE_DIR/src/navigation.sh"
+source "$BASE_DIR/src/history.sh"
+source "$BASE_DIR/src/bookmarks.sh"
 source "$BASE_DIR/src/parser.sh"
 source "$BASE_DIR/src/renderer.sh"
 source "$BASE_DIR/src/input.sh"
-source "$BASE_DIR/src/navigation.sh"
 source "$BASE_DIR/src/browser_engine.sh"
 
 render_ui_chrome() {
@@ -21,14 +25,15 @@ render_ui_chrome() {
 │ Title:  $title_display
 │ Status: ${browser_message:-Ready}
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ Commands: open <url> | <n> | fill <id> <val> | press <btn> | reload | search│
-│ Nav:      back (b) | forward (f) | reload (r) | help (?) | quit (q)          │
+│ Commands: open <url> | <n> | fill <id> <val> | press | search <q> | reload  │
+│ Bookmarks: bm add | bm (list) | bm <n> (open) | bm del <n>                  │
+│ History:   h (list) | h <n> (jump) | back (b) | forward (f)                 │
+│ Other:     help (?) | quit (q)                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 EOF
 }
 
 main() {
-    # Default start page if desired
     local initial_url="${1:-https://example.com}"
     load_page "$initial_url" "true"
 

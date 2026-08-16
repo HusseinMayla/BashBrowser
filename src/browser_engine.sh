@@ -4,14 +4,26 @@
 
 declare -a page_elements=()
 declare -a page_links=()
+current_url=""
 current_title=""
 browser_message=""
+
+declare -A form_hidden_inputs=()
+form_action=""
+form_method="post"
 
 # Adapt parse_page tab-separated output to renderer page_elements (type|id|content|extra)
 adapter_parse_to_elements() {
     local html="$1"
     page_elements=()
     page_links=()
+    declare -gA form_hidden_inputs=()
+
+    # Extract form action and method if present
+    form_action=$(printf '%s\n' "$html" | grep -oiP '<form[^>]*action="?\K[^" >]+' | head -n 1)
+    form_method=$(printf '%s\n' "$html" | grep -oiP '<form[^>]*method="?\K[^" >]+' | head -n 1)
+    [[ -z "$form_method" ]] && form_method="post"
+    [[ -z "$form_action" ]] && form_action="$current_url"
 
     local parsed_output
     parsed_output=$(parse_page "$html")
@@ -21,8 +33,8 @@ adapter_parse_to_elements() {
 
         case "$type" in
             heading)
-                # level=X text=Y
                 local level="" text=""
+                local f1 f2
                 IFS=$'\t' read -r f1 f2 <<< "$rest"
                 [[ "$f1" =~ ^level=(.*)$ ]] && level="${BASH_REMATCH[1]}"
                 [[ "$f2" =~ ^text=(.*)$ ]] && text="${BASH_REMATCH[1]}"
@@ -30,15 +42,14 @@ adapter_parse_to_elements() {
                 ;;
 
             text)
-                # text=Y
                 local text=""
                 [[ "$rest" =~ ^text=(.*)$ ]] && text="${BASH_REMATCH[1]}"
                 page_elements+=("text||${text}|")
                 ;;
 
             link)
-                # href=X text=Y
                 local href="" text=""
+                local f1 f2
                 IFS=$'\t' read -r f1 f2 <<< "$rest"
                 [[ "$f1" =~ ^href=(.*)$ ]] && href="${BASH_REMATCH[1]}"
                 [[ "$f2" =~ ^text=(.*)$ ]] && text="${BASH_REMATCH[1]}"
@@ -47,34 +58,39 @@ adapter_parse_to_elements() {
                 ;;
 
             button)
-                # id=X type=Y text=Z
-                local id="" btype="" text=""
+                local bid="" btype="" text=""
+                local f1 f2 f3
                 IFS=$'\t' read -r f1 f2 f3 <<< "$rest"
-                [[ "$f1" =~ ^id=(.*)$ ]] && id="${BASH_REMATCH[1]}"
+                [[ "$f1" =~ ^id=(.*)$ ]] && bid="${BASH_REMATCH[1]}"
                 [[ "$f2" =~ ^type=(.*)$ ]] && btype="${BASH_REMATCH[1]}"
                 [[ "$f3" =~ ^text=(.*)$ ]] && text="${BASH_REMATCH[1]}"
-                page_elements+=("button|${id}|${text}|${btype}")
+                page_elements+=("button|${bid}|${text}|${btype}")
                 ;;
 
             input)
-                # id=X name=Y type=Z value=W
-                local id="" name="" itype="" value=""
+                local iid="" iname="" itype="" ival=""
+                local f1 f2 f3 f4
                 IFS=$'\t' read -r f1 f2 f3 f4 <<< "$rest"
-                [[ "$f1" =~ ^id=(.*)$ ]] && id="${BASH_REMATCH[1]}"
-                [[ "$f2" =~ ^name=(.*)$ ]] && name="${BASH_REMATCH[1]}"
+                [[ "$f1" =~ ^id=(.*)$ ]] && iid="${BASH_REMATCH[1]}"
+                [[ "$f2" =~ ^name=(.*)$ ]] && iname="${BASH_REMATCH[1]}"
                 [[ "$f3" =~ ^type=(.*)$ ]] && itype="${BASH_REMATCH[1]}"
-                [[ "$f4" =~ ^value=(.*)$ ]] && value="${BASH_REMATCH[1]}"
-                # renderer uses: type | id | content (name) | extra (value)
-                page_elements+=("input|${id}|${name}|${value}")
+                [[ "$f4" =~ ^value=(.*)$ ]] && ival="${BASH_REMATCH[1]}"
+
+                local field_id="${iid:-$iname}"
+                if [[ "$itype" == "hidden" ]]; then
+                    [[ -n "$field_id" ]] && form_hidden_inputs["$field_id"]="$ival"
+                else
+                    page_elements+=("input|${field_id}|${iname}|${ival}")
+                fi
                 ;;
 
             label)
-                # for=X text=Y
-                local for_id="" text=""
+                local lfor="" text=""
+                local f1 f2
                 IFS=$'\t' read -r f1 f2 <<< "$rest"
-                [[ "$f1" =~ ^for=(.*)$ ]] && for_id="${BASH_REMATCH[1]}"
+                [[ "$f1" =~ ^for=(.*)$ ]] && lfor="${BASH_REMATCH[1]}"
                 [[ "$f2" =~ ^text=(.*)$ ]] && text="${BASH_REMATCH[1]}"
-                page_elements+=("label|${for_id}|${text}|")
+                page_elements+=("label|${lfor}|${text}|")
                 ;;
 
             br)
@@ -89,6 +105,11 @@ load_page() {
     local target_url="$1"
     local push_to_history="${2:-true}"
 
+    if [[ -z "$target_url" ]]; then
+        browser_message="No URL specified."
+        return 1
+    fi
+
     # Prepend https:// if protocol is missing
     if [[ "$target_url" != http://* && "$target_url" != https://* ]]; then
         target_url="https://${target_url}"
@@ -100,20 +121,98 @@ load_page() {
     local fetch_status=$?
 
     if [[ $fetch_status -ne 0 || -z "$html" ]]; then
-        browser_message="Failed to load page: ${target_url}"
+        local err_reason="Network error or empty response"
+        [[ -f /tmp/bashbrowser_error ]] && err_reason=$(cat /tmp/bashbrowser_error)
+        browser_message="Failed to load page: ${err_reason}"
         return 1
     fi
 
-    if [[ "$push_to_history" == "true" ]]; then
-        history_push "$target_url"
+    if [[ -f /tmp/bashbrowser_effective_url ]]; then
+        local eff_url
+        eff_url=$(cat /tmp/bashbrowser_effective_url)
+        [[ -n "$eff_url" ]] && target_url="$eff_url"
     fi
 
     current_url="$target_url"
+
+    if [[ "$push_to_history" == "true" ]]; then
+        history_add "$current_url"
+    fi
+
     current_title=$(get_title "$html")
     [[ -z "$current_title" ]] && current_title="[No Title]"
 
     adapter_parse_to_elements "$html"
     browser_message="Page loaded successfully (${#page_elements[@]} elements)."
+    return 0
+}
+
+submit_form() {
+    local target_url="$current_url"
+    if [[ -n "$form_action" ]]; then
+        target_url=$(resolve_url "$current_url" "$form_action")
+    fi
+
+    # Build URL-encoded post parameters from visible + hidden inputs
+    local post_data=""
+
+    # 1. Hidden inputs (CSRF tokens, etc.)
+    for key in "${!form_hidden_inputs[@]}"; do
+        local val="${form_hidden_inputs[$key]}"
+        local enc_key enc_val
+        enc_key=$(url_encode "$key")
+        enc_val=$(url_encode "$val")
+        [[ -n "$post_data" ]] && post_data="${post_data}&"
+        post_data="${post_data}${enc_key}=${enc_val}"
+    done
+
+    # 2. Visible input fields
+    for element in "${page_elements[@]}"; do
+        IFS='|' read -r etype eid econtent eextra <<< "$element"
+        if [[ "$etype" == "input" ]]; then
+            local field_name="${econtent:-$eid}"
+            local field_val="$eextra"
+            if [[ -n "$field_name" ]]; then
+                local enc_key enc_val
+                enc_key=$(url_encode "$field_name")
+                enc_val=$(url_encode "$field_val")
+                [[ -n "$post_data" ]] && post_data="${post_data}&"
+                post_data="${post_data}${enc_key}=${enc_val}"
+            fi
+        fi
+    done
+
+    browser_message="Submitting form to ${target_url}..."
+    local html
+    if [[ "${form_method,,}" == "get" ]]; then
+        html=$(fetch_page "${target_url}?${post_data}")
+    else
+        html=$(post_page "$target_url" "$post_data" "$current_url")
+    fi
+    local fetch_status=$?
+
+    if [[ $fetch_status -ne 0 || -z "$html" ]]; then
+        local err_reason="Submission rejected or timeout"
+        [[ -f /tmp/bashbrowser_error ]] && err_reason=$(cat /tmp/bashbrowser_error)
+        browser_message="Form submission failed: ${err_reason}"
+        return 1
+    fi
+
+    if [[ -f /tmp/bashbrowser_effective_url ]]; then
+        local eff_url
+        eff_url=$(cat /tmp/bashbrowser_effective_url)
+        [[ -n "$eff_url" ]] && current_url="$eff_url"
+    else
+        current_url="$target_url"
+    fi
+
+    history_add "$current_url"
+
+    current_title=$(get_title "$html")
+    [[ -z "$current_title" ]] && current_title="[No Title]"
+
+    adapter_parse_to_elements "$html"
+    browser_message="Form submitted successfully (${#page_elements[@]} elements)."
     return 0
 }
 
@@ -140,7 +239,25 @@ handle_action() {
             fi
             local encoded
             encoded=$(url_encode "$arg")
-            load_page "https://html.duckduckgo.com/html/?q=${encoded}" "true"
+            browser_message="Searching for '$arg'..."
+            local html
+            html=$(post_page "https://lite.duckduckgo.com/lite/" "q=${encoded}")
+            local fetch_status=$?
+
+            if [[ $fetch_status -ne 0 || -z "$html" ]]; then
+                local err_reason="Search request failed"
+                [[ -f /tmp/bashbrowser_error ]] && err_reason=$(cat /tmp/bashbrowser_error)
+                browser_message="Search failed: ${err_reason}"
+                return 1
+            fi
+
+            current_url="https://lite.duckduckgo.com/lite/?q=${encoded}"
+            history_add "$current_url"
+            current_title=$(get_title "$html")
+            [[ -z "$current_title" || "$current_title" == "[No Title]" ]] && current_title="Search: $arg"
+
+            adapter_parse_to_elements "$html"
+            browser_message="Search results for '${arg}' (${#page_elements[@]} elements)."
             ;;
 
         click)
@@ -167,29 +284,71 @@ handle_action() {
             ;;
 
         back)
-            local back_count=${#history_back[@]}
-            if (( back_count == 0 )); then
-                browser_message="No history to go back to."
-                return 1
+            if history_back; then
+                load_page "$history_result" "false"
+            else
+                browser_message="No previous page in history."
             fi
-
-            local prev_url="${history_back[$((back_count - 1))]}"
-            unset 'history_back[back_count - 1]'
-            history_forward+=("$current_url")
-            load_page "$prev_url" "false"
             ;;
 
         forward)
-            local fwd_count=${#history_forward[@]}
-            if (( fwd_count == 0 )); then
-                browser_message="No forward history."
-                return 1
+            if history_forward; then
+                load_page "$history_result" "false"
+            else
+                browser_message="No forward page in history."
             fi
+            ;;
 
-            local next_url="${history_forward[$((fwd_count - 1))]}"
-            unset 'history_forward[fwd_count - 1]'
-            history_back+=("$current_url")
-            load_page "$next_url" "false"
+        history)
+            echo ""
+            echo "── Visited History ──"
+            history_list
+            echo "─────────────────────"
+            read -r -p "Press Enter to return to browser..." _
+            ;;
+
+        history_jump)
+            if history_get "$arg"; then
+                load_page "$history_result" "false"
+            else
+                browser_message="Invalid history index: $arg"
+            fi
+            ;;
+
+        bookmark_add)
+            if [[ -z "$current_url" ]]; then
+                browser_message="No active page to bookmark."
+            else
+                local msg
+                msg=$(bookmark_add "$current_url")
+                browser_message="${msg:-Bookmark added: $current_url}"
+            fi
+            ;;
+
+        bookmark_list)
+            echo ""
+            echo "── Saved Bookmarks ──"
+            bookmark_list
+            echo "─────────────────────"
+            read -r -p "Press Enter to return to browser..." _
+            ;;
+
+        bookmark_open)
+            local bm_url
+            if bm_url=$(bookmark_get "$arg"); then
+                load_page "$bm_url" "true"
+            else
+                browser_message="Bookmark #$arg not found."
+            fi
+            ;;
+
+        bookmark_del)
+            local del_msg
+            if del_msg=$(bookmark_delete "$arg"); then
+                browser_message="$del_msg"
+            else
+                browser_message="Failed to delete bookmark #$arg"
+            fi
             ;;
 
         fill)
@@ -217,7 +376,7 @@ handle_action() {
             ;;
 
         press)
-            browser_message="Pressed button: $arg"
+            submit_form
             ;;
 
         reload)
@@ -230,11 +389,28 @@ handle_action() {
             ;;
 
         help)
-            browser_message="Commands: open <url> | <n> (click link) | fill <id> <val> | press <btn> | reload | search <q> | back | forward | quit"
+            echo ""
+            echo "── BashBrowser Help ──"
+            echo "  open <url>           : Navigate to URL"
+            echo "  <n>                  : Click link number <n>"
+            echo "  fill <id> <val>      : Fill an input field"
+            echo "  press                : Submit active form"
+            echo "  search <query>       : Search DuckDuckGo"
+            echo "  bm add               : Bookmark current page"
+            echo "  bm / bookmarks       : List bookmarks"
+            echo "  bm <n>               : Open bookmark number <n>"
+            echo "  bm del <n>           : Delete bookmark number <n>"
+            echo "  h / history          : View navigation history"
+            echo "  h <n>                : Jump to history entry <n>"
+            echo "  b / back             : Go back"
+            echo "  f / forward          : Go forward"
+            echo "  r / reload           : Reload page"
+            echo "  q / quit             : Exit browser"
+            echo "──────────────────────"
+            read -r -p "Press Enter to return to browser..." _
             ;;
 
         noop)
-            # User simply pressed enter without input; do nothing and keep state
             ;;
 
         quit)

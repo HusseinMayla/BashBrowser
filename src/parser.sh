@@ -1,173 +1,102 @@
 #!/bin/bash
 
-# get any title from the extracted html page
+# HTML Parser: Extracts semantic & interactive elements
 
+# Extract page title
 get_title() {
     local html="$1"
-
-    printf '%s\n' "$html" |
-        grep -oiP '(?<=<title>).*?(?=</title>)'
+    local title=""
+    title=$(printf '%s\n' "$html" | grep -oiP '(?<=<title>)(.*?)(?=</title>)' | head -n 1)
+    title="${title#"${title%%[![:space:]]*}"}"
+    title="${title%"${title##*[![:space:]]}"}"
+    printf '%s\n' "${title:-[No Title]}"
 }
 
-# get any link from the extracted html page 
-
-extract_links() {
-    local html="$1"
-
-    printf '%s\n' "$html" |
-        grep -oiP 'href="\K[^"]+'
-}
-
-trim_text() {
-    local text="$1"
-
-    # Remove inner HTML tags (e.g. <b>...</b> or <span>...</span>)
-    text=$(printf '%s\n' "$text" | sed -E 's/<[^>]+>//g')
-
-    # Trim leading and trailing whitespace
-    text="${text#"${text%%[![:space:]]*}"}"
-    text="${text%"${text##*[![:space:]]}"}"
-
-    printf '%s\n' "$text"
-}
-
-# character translator, remove scripts/styles and make every tag a token
-
-tokenize_html() {
-    local html="$1"
-
-    # 1. Strip script and style blocks
-    local clean_html
-    clean_html=$(printf '%s\n' "$html" | perl -0777 -pe 's/<script\b[^>]*>.*?<\/script>//gis; s/<style\b[^>]*>.*?<\/style>//gis')
-
-    # 2. Convert newlines to spaces, then insert newlines between HTML tags
-    printf '%s' "$clean_html" |
-        tr '\n\r\t' ' ' |
-        sed -E 's/>[[:space:]]*</>\n</g'
-}
-
-# get value attrivutes 
-
-get_attribute() {
-    local attributes="$1"
-    local name="$2"
-
-    local double_regex
-    local single_regex
-
-    double_regex="(^|[[:space:]])${name}[[:space:]]*=[[:space:]]*\"([^\"]*)\""
-    single_regex="(^|[[:space:]])${name}[[:space:]]*=[[:space:]]*'([^']*)'"
-
-    if [[ "$attributes" =~ $double_regex ]]; then
-        printf '%s\n' "${BASH_REMATCH[2]}"
-        return 0
-    fi
-
-    if [[ "$attributes" =~ $single_regex ]]; then
-        printf '%s\n' "${BASH_REMATCH[2]}"
-        return 0
-    fi
-
-    printf '\n'
-    return 1
-}
-
-
-#output  the  
+# Parse HTML into structured tab-separated elements
 parse_page() {
     local html="$1"
-    local token
-    local text
-    local level
 
-    local label_regex='^<label([^>]*)>(.*)</label>$'
-    local input_regex='^<input([^>]*)/?>$'
-    local button_regex='^<button([^>]*)>(.*)</button>$'
-    local heading_regex='^<h([1-6])[^>]*>(.*)</h[1-6]>$'
-    local paragraph_regex='^<p[^>]*>(.*)</p>$'
-    local link_regex='^<a([^>]*)>(.*)</a>$'
-    local br_regex='^<br[[:space:]]*/?>$'
+    perl -0777 -ne '
+        # Strip script and style blocks
+        s/<script\b[^>]*>.*?<\/script>//gis;
+        s/<style\b[^>]*>.*?<\/style>//gis;
 
-    while IFS= read -r token || [[ -n "$token" ]]; do
+        # Match interactive & semantic elements: inputs, headings, buttons, links, labels, paragraphs
+        while (m{<(input|br)\b([^>]*)/?>|<(h[1-6]|button|a|label|p)\b([^>]*)>(.*?)</\3>}gis) {
+            my $tag = lc($1 || $3);
+            my $attrs = $2 || $4 || "";
+            my $inner = $5 || "";
 
-        if [[ "$token" =~ $heading_regex ]]; then
-            level="${BASH_REMATCH[1]}"
-            text="${BASH_REMATCH[2]}"
-            text=$(trim_text "$text")
+            # If paragraph contains inner links, parse them cleanly
+            if ($tag eq "p" && $inner =~ m{<a\b}i) {
+                while ($inner =~ m{<a\b([^>]*)>(.*?)</a>}gis) {
+                    my ($l_attrs, $l_inner) = ($1, $2);
+                    my $l_href = "";
+                    $l_href = $1 if $l_attrs =~ /\bhref\s*=\s*["\x27]([^"\x27]*)["\x27]/i || $l_attrs =~ /\bhref\s*=\s*([^"\x27\s>]+)/i;
+                    $l_inner =~ s/<[^>]+>/ /g;
+                    $l_inner =~ s/^\s+|\s+$//g;
+                    print "link\thref=$l_href\ttext=$l_inner\n" if $l_inner ne "";
+                }
+                next;
+            }
 
-            [[ -n "$text" ]] && printf 'heading\tlevel=%s\ttext=%s\n' "$level" "$text"
+            my $get_attr = sub {
+                my ($name) = @_;
+                return $1 if $attrs =~ /\b$name\s*=\s*["\x27]([^"\x27]*)["\x27]/i;
+                return $1 if $attrs =~ /\b$name\s*=\s*([^"\x27\s>]+)/i;
+                return "";
+            };
 
-        elif [[ "$token" =~ $paragraph_regex ]]; then
-            text="${BASH_REMATCH[1]}"
-            text=$(trim_text "$text")
+            # Clean screen reader clutter
+            $inner =~ s/<span\s+class="sr-only"[^>]*>.*?<\/span>//gis if $inner =~ /<h[1-6]|<strong|[a-zA-Z]{3,}/i;
 
-            [[ -n "$text" ]] && printf 'text\ttext=%s\n' "$text"
+            # Clean inner tags and entities
+            $inner =~ s/<[^>]+>/ /g;
+            $inner =~ s/&times;/×/g;
+            $inner =~ s/&amp;/&/g;
+            $inner =~ s/&lt;/</g;
+            $inner =~ s/&gt;/>/g;
+            $inner =~ s/&quot;/"/g;
+            $inner =~ s/&#x25C4;/◄/g;
+            $inner =~ s/&#x25BA;/►/g;
+            $inner =~ s/^\s+|\s+$//g;
+            $inner =~ s/\s+/ /g;
 
-        elif [[ "$token" =~ $link_regex ]]; then
-            local attributes="${BASH_REMATCH[1]}"
-            text="${BASH_REMATCH[2]}"
-            text=$(trim_text "$text")
+            # Skip empty text elements for containers
+            if ($tag ne "input" && $tag ne "br") {
+                next if $inner eq "Course image" || $inner eq "";
+            }
 
-            local href
-            href=$(get_attribute "$attributes" "href")
-
-            [[ -n "$text" || -n "$href" ]] && printf 'link\thref=%s\ttext=%s\n' "$href" "${text:-$href}"
-
-        elif [[ "$token" =~ $button_regex ]]; then
-            local attributes="${BASH_REMATCH[1]}"
-            text="${BASH_REMATCH[2]}"
-            text=$(trim_text "$text")
-
-            local button_id
-            local button_type
-
-            button_id=$(get_attribute "$attributes" "id")
-            button_type=$(get_attribute "$attributes" "type")
-
-            printf 'button\tid=%s\ttype=%s\ttext=%s\n' \
-                "$button_id" \
-                "$button_type" \
-                "${text:-Submit}"
-
-        elif [[ "$token" =~ $input_regex ]]; then
-            local attributes="${BASH_REMATCH[1]}"
-
-            local input_id
-            local input_name
-            local input_type
-            local input_value
-            local input_placeholder
-
-            input_id=$(get_attribute "$attributes" "id")
-            input_name=$(get_attribute "$attributes" "name")
-            input_type=$(get_attribute "$attributes" "type")
-            input_value=$(get_attribute "$attributes" "value")
-            input_placeholder=$(get_attribute "$attributes" "placeholder")
-
-            # Skip hidden CSRF/anti-forgery tokens so they don't clutter the UI
-            if [[ "$input_type" != "hidden" ]]; then
-                # If value is empty, use placeholder as initial prompt text
-                local display_value="${input_value:-$input_placeholder}"
-                printf 'input\tid=%s\tname=%s\ttype=%s\tvalue=%s\n' \
-                    "$input_id" \
-                    "$input_name" \
-                    "${input_type:-text}" \
-                    "$display_value"
-            fi
-
-        elif [[ "$token" =~ $label_regex ]]; then
-            local attributes="${BASH_REMATCH[1]}"
-            text="${BASH_REMATCH[2]}"
-            text=$(trim_text "$text")
-
-            local label_for
-            label_for=$(get_attribute "$attributes" "for")
-
-            [[ -n "$text" ]] && printf 'label\tfor=%s\ttext=%s\n' "$label_for" "$text"
-
-        elif [[ "$token" =~ $br_regex ]]; then
-            printf 'br\n'
-        fi
-
-    done < <(tokenize_html "$html")
+            if ($tag =~ /^h([1-6])$/) {
+                print "heading\tlevel=$1\ttext=$inner\n";
+            }
+            elsif ($tag eq "a") {
+                my $href = $get_attr->("href");
+                print "link\thref=$href\ttext=$inner\n";
+            }
+            elsif ($tag eq "button") {
+                my $id = $get_attr->("id");
+                my $type = $get_attr->("type") || "button";
+                $inner = $get_attr->("value") || "Button" if $inner eq "";
+                print "button\tid=$id\ttype=$type\ttext=$inner\n";
+            }
+            elsif ($tag eq "input") {
+                my $id = $get_attr->("id");
+                my $name = $get_attr->("name");
+                my $type = lc($get_attr->("type") || "text");
+                my $val = $get_attr->("value") || $get_attr->("placeholder");
+                print "input\tid=$id\tname=$name\ttype=$type\tvalue=$val\n";
+            }
+            elsif ($tag eq "p") {
+                print "text\ttext=$inner\n";
+            }
+            elsif ($tag eq "label") {
+                my $for = $get_attr->("for");
+                print "label\tfor=$for\ttext=$inner\n";
+            }
+            elsif ($tag eq "br") {
+                print "br\n";
+            }
+        }
+    ' <<< "$html"
 }

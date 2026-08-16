@@ -1,0 +1,7 @@
+# Backups & Temporary Snapshots
+backup/
+temp/
+
+# User Data (cookies, bookmarks)
+data/
+*.Zone.Identifier
